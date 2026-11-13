@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>单证协作板 · 本机版</title>
+<title>单证协作板 · 云端共享版</title>
 <style>
 /* ==================== CONFIG：设计令牌 ==================== */
 :root{
@@ -284,7 +284,7 @@ textarea.input{min-height:88px;resize:vertical}
 <div class="shell">
   <!-- 版式家族 1：竖向 rail -->
   <aside class="rail" aria-label="侧栏">
-    <div class="brand"><span class="mark" id="brandMark"></span>单证协作板<small>本机版</small></div>
+    <div class="brand"><span class="mark" id="brandMark"></span>单证协作板<small>云端版</small></div>
     <div id="railViews"></div>
     <div id="railProjects"></div>
     <div id="railTools"></div>
@@ -292,7 +292,7 @@ textarea.input{min-height:88px;resize:vertical}
 
   <main class="workspace">
     <!-- 诚实声明：显眼位置，一行说明 -->
-    <div class="honest" id="honest"><span id="honestIcon"></span><span id="honestText">数据仅保存在本机浏览器，不与其他成员同步</span><span class="honest-tag">单机 · 无同步</span></div>
+    <div class="honest" id="honest"><span id="honestIcon"></span><span id="honestText">数据保存在云端，打开此链接的成员看到同一份；链接持有者均可修改</span><span class="honest-tag" id="honestTag">云端共享 · 自动同步</span></div>
     <!-- 版式家族 2：项目头 -->
     <header class="head" id="head"></header>
     <!-- 版式家族 3：工具条 -->
@@ -302,6 +302,7 @@ textarea.input{min-height:88px;resize:vertical}
       <label class="sr-only" for="ownerFilter">按负责人筛选</label>
       <select id="ownerFilter" aria-label="按负责人筛选"></select>
       <button class="btn btn-primary" id="newTaskBtn" data-act="new-task"><span id="newIcon"></span>新建任务</button>
+      <button class="btn" id="refreshBtn" data-act="refresh"><span id="refreshIcon"></span>刷新</button>
       <div class="hints" aria-label="键盘快捷键">
         <kbd>N</kbd>新建 <kbd>/</kbd>搜索 <kbd>J</kbd><kbd>K</kbd>同列移动
         <kbd>←</kbd><kbd>→</kbd>推进回退 <kbd>Enter</kbd>详情 <kbd>Esc</kbd>关闭
@@ -316,8 +317,9 @@ textarea.input{min-height:88px;resize:vertical}
 <div class="flash" id="flash" role="status" aria-live="polite" hidden></div>
 <div class="overlay" id="overlay" hidden><div class="backdrop" id="backdrop"></div><div class="panel" id="panel" role="dialog" aria-modal="true"></div></div>
 <input type="file" id="importFile" accept=".json,application/json" hidden>
-<noscript><p style="padding:var(--s-24)">需要启用 JavaScript 才能使用本机看板；数据保存在本机浏览器，不与其他成员同步。</p></noscript>
+<noscript><p style="padding:var(--s-24)">需要启用 JavaScript 才能使用协作看板；数据保存在云端，打开此链接的成员看到同一份。</p></noscript>
 
+<script src="https://cdn.jsdelivr.net/npm/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js"></script>
 <script>
 /* ==================== CONFIG：常量与统一图标集 ==================== */
 const STATUS = [{key:'todo',label:'待办'},{key:'doing',label:'进行中'},{key:'done',label:'已完成'}];
@@ -342,7 +344,8 @@ const ICONS = {
   edit:'<path d="M4 20h4l10-10-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
   inbox:'<path d="M4 5h16l2 9v5H2v-5z"/><path d="M2 14h6l1 2h6l1-2h6"/>',
   sliders:'<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
-  list:'<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>'
+  list:'<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
+  refresh:'<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5V9H15"/>'
 };
 function ico(name, cls){ return '<svg class="ico '+(cls||'')+'" viewBox="0 0 24 24" aria-hidden="true" focusable="false">'+(ICONS[name]||'')+'</svg>'; }
 /* 状态三重编码：形状（空心圆 / 半环 / 实心勾）+ 颜色 + 文字，灰度仍可辨 */
@@ -365,23 +368,193 @@ function fmtDue(due){ if(!due) return '未设截止日'; const p=due.split('-');
 /* 逾期是跨状态叠加标记：叠加在待办/进行中卡片上，不做第四列；已完成的任务不再计逾期 */
 function isOverdue(t){ return t.status!=='done' && overdueDays(t.due)>0; }
 
-/* ==================== STORE：唯一数据链路 localStorage ==================== */
-const STORE = {
-  KEY:'team-board:v1', ok:true, mem:null,
-  read(){ if(!this.ok) return this.mem; try{ return localStorage.getItem(this.KEY); }catch(e){ this.ok=false; return this.mem; } },
-  getAll(){
-    const raw=this.read();
-    if(raw===null){ const s=seedDB(); this.save(s); return s; }
-    try{ return normalize(JSON.parse(raw)); }catch(e){ const s=seedDB(); this.save(s); return s; }
-  },
-  save(db){
-    const s=JSON.stringify(db);
-    if(this.ok){ try{ localStorage.setItem(this.KEY,s); }catch(e){ this.ok=false; } }
-    if(!this.ok) this.mem=s;
-    return db;
-  },
-  reset(){ this.mem=null; if(this.ok){ try{ localStorage.removeItem(this.KEY); }catch(e){ this.ok=false; } } }
+/* ==================== STORE：唯一数据链路 = 云端 public.board_state ====================
+   单表 id=1 / payload JSONB，团队共享，不发送 owner_id、不按用户过滤。
+   内存 cache（全局 DB）支撑同步渲染：先改 cache → 立即重渲染 → await 云端 upsert。
+   失败一律回滚 cache + 明确中文提示；绝不降级回浏览器本地存储 / 内存假数据，也绝不静默成功。 */
+const CLOUD_CONFIG = {
+  endpoint:'https://team-task-board-33388.app.workbuddy.host',
+  oauthRelayBaseUrl:'https://www.workbuddy.cn/v2/as/genie-baas/oauth',
+  publishableKey:'wbpk_W0KRLKGwYtMy023IWE6I51_Yu72DkwD41yDkkHdRWZPTYYzAAoLpLnZ'
 };
+const POLL_MS = 15000;
+const STORE = {
+  cloud:null,
+  confirmed:'',          // 最后一次被云端确认的完整 JSON 快照（失败回滚的基准）
+  latest:'',             // 最后一次发起写入的快照（决定由谁负责报错）
+  pending:0,             // 未确认写入数，>0 时暂停轮询
+  writeChain:Promise.resolve(),
+  emptyWarned:false,
+  pollTimer:null,
+
+  init(){
+    if(this.cloud) return this.cloud;                        // 只初始化一次
+    if(typeof WorkBuddyCloud==='undefined'||!WorkBuddyCloud.createWorkBuddyCloud){
+      const e=new Error('云端 SDK 未加载'); e.code='SDK_MISSING'; throw e;
+    }
+    this.cloud=WorkBuddyCloud.createWorkBuddyCloud({
+      endpoint:CLOUD_CONFIG.endpoint,
+      oauthRelayBaseUrl:CLOUD_CONFIG.oauthRelayBaseUrl,
+      publishableKey:CLOUD_CONFIG.publishableKey
+    });
+    return this.cloud;
+  },
+  /* 读取：空表时 maybeSingle 返回 data=null，不视为错误 */
+  async load(){
+    const { data, error } = await this.cloud.database
+      .from('board_state').select('payload').eq('id',1).maybeSingle();
+    if(error) throw error;
+    if(!data || !data.payload) return null;
+    return normalize(data.payload);                        // 云端也是数据边界，沿用同一 JSON 形状
+  },
+  /* 写入：整块 payload upsert；.select() 用来区分「被 RLS 拦下」与「确实写入」 */
+  async persist(db){
+    const { data, error } = await this.cloud.database
+      .from('board_state').upsert({ id:1, payload:db }).select();
+    if(error) throw error;
+    if(!Array.isArray(data) || data.length===0){
+      const e=new Error('写入未生效：云端没有返回被更新的行');
+      e.code='42501'; throw e;
+    }
+    return data;
+  },
+  /* 保持原有 save(db) 调用点：乐观更新 + 串行化写入 + 失败回滚 + 仅在确认后报成功 */
+  save(db, okMsg){
+    const optimistic=JSON.stringify(db);
+    this.latest=optimistic;
+    this.pending++;
+    this.writeChain=this.writeChain.then(async ()=>{
+      try{
+        await this.persist(JSON.parse(optimistic));
+        this.confirmed=optimistic;
+        if(okMsg) flash(okMsg,'ok');
+        return true;
+      }catch(err){
+        const isLatest=this.latest===optimistic;
+        if(isLatest && JSON.stringify(DB)===optimistic){
+          DB=JSON.parse(this.confirmed||'null');
+          if(!DB || !Array.isArray(DB.projects)) DB=blankDB();
+          render();                                          // 回滚后立刻重渲染
+        }
+        if(isLatest) flash('保存失败，改动已回滚。'+cloudReason(err),'err');
+        return false;
+      }finally{
+        this.pending--;
+      }
+    });
+    return this.writeChain;
+  }
+};
+/* 键序无关的指纹：新建任务时 Object.assign 的键顺序与 normalize 不同，
+   若直接比 JSON.stringify 会把「同一份数据」误判成「别人改过」，每 15 秒假同步一次。 */
+function canon(v){
+  if(v===undefined) return 'null';
+  if(Array.isArray(v)) return '['+v.map(canon).join(',')+']';
+  if(v && typeof v==='object') return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canon(v[k])).join(',')+'}';
+  return JSON.stringify(v);
+}
+/* 按错误分支给出明确中文原因；不打印密钥、不打印原始行数据 */
+function cloudReason(err){
+  if(!err) return '未知错误，请稍后重试。';
+  const code=String(err.code||'');
+  const msg=String(err.message||err).replace(/wbpk_[A-Za-z0-9_]+/g,'[密钥已隐藏]');
+  const raw=(code+' '+msg).toLowerCase();
+  if(code==='SDK_MISSING'||raw.includes('workbuddycloud'))
+    return '云端 SDK 未加载成功，请检查网络后点击「重新加载」。';
+  if(code==='42P01'||raw.includes('42p01')||/relation .* does not exist|table .* does not exist|undefined_table/.test(raw))
+    return '云端数据表 board_state 不存在（42P01），改动没有保存，请联系管理员建表。';
+  if(code==='42501'||raw.includes('42501')||/permission denied|row-level security|rls|policy|not allowed/.test(raw))
+    return '没有云端写入权限（42501），改动没有保存，请联系管理员检查共享表策略。';
+  if(/quota|额度|billing|expired|402|429|rate limit|too many requests|limit exceeded/.test(raw))
+    return '云服务额度不足或请求被限流，改动没有保存，请稍后重试或联系管理员。';
+  if(err.name==='TypeError'||/failed to fetch|networkerror|load failed|fetch failed|timeout|timed out|aborted|network request failed|err_internet_disconnected|offline/.test(raw))
+    return '网络连接失败，改动没有保存到云端，请检查网络后重试。';
+  if(/401|403|unauthorized|jwt|credential|forbidden|invalid.*key/.test(raw))
+    return '云服务身份校验未通过，请重新打开分享链接。';
+  return '云端返回：'+msg+'。请稍后重试。';
+}
+/* 加载态 / 致命错误态：都不白屏，也不写入任何本机假数据 */
+function renderLoading(){
+  $('#board').innerHTML='<div class="empty">'+ico('inbox','ico-xl')+
+    '<h2>正在连接云端数据</h2><p>正在读取共享看板，请稍候…</p></div>';
+}
+function renderFatal(reason){
+  $('#board').innerHTML='<div class="empty">'+ico('alert','ico-xl')+
+    '<h2>无法连接云端数据</h2><p>'+esc(reason)+'</p>'+
+    '<p>本次没有读取或写入任何本机数据；页面不会用假数据顶替云端。</p>'+
+    '<div class="empty-actions"><button class="btn btn-primary" data-act="retry-init">重新加载</button></div></div>';
+}
+/* 首次启动：load → 空表则写入示例数据 → 渲染 → 开启轮询 */
+async function init(){
+  if(STORE.pollTimer){ clearInterval(STORE.pollTimer); STORE.pollTimer=null; }
+  CONN.state='loading'; CONN.message='';
+  try{
+    renderLoading(); renderHonest();
+    STORE.init();
+    let remote=await STORE.load();
+    if(!remote){
+      remote=seedDB();                                     // 沿用现有外贸单证示例 + 示例数据徽标
+      await STORE.persist(remote);
+    }
+    DB=remote;
+    STORE.confirmed=JSON.stringify(remote);
+    STORE.latest=STORE.confirmed;
+    STORE.emptyWarned=false;
+    CONN.state='ok'; CONN.message='';
+    render();
+    startPolling();
+    flash('已连接云端共享看板，改动会同步给所有成员。','ok');
+  }catch(err){
+    CONN.state='error'; CONN.message=cloudReason(err);
+    renderHonest(); renderFatal(CONN.message);
+  }
+}
+/* 手动刷新：失败不改动内存数据，也不假装成功 */
+async function refreshNow(){
+  if(CONN.state==='error'){ init(); return; }
+  if(CONN.state!=='ok') return;
+  if(STORE.pending>0){ flash('正在保存改动，请稍后再刷新。','err'); return; }
+  const btn=$('#refreshBtn'); if(btn) btn.disabled=true;
+  try{
+    const remote=await STORE.load();
+    if(!remote){ flash('云端共享数据为空，暂无法刷新。','err'); return; }
+    STORE.emptyWarned=false;
+    if(canon(remote)!==canon(DB)){
+      DB=remote; STORE.confirmed=JSON.stringify(remote);
+      render();
+      flash('已拉取其他成员的最新改动。','ok');
+    }else{
+      flash('已是最新数据。','ok');
+    }
+    CONN.state='ok'; CONN.message=''; renderHonest();
+  }catch(err){
+    flash('刷新失败。'+cloudReason(err),'err');
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
+/* 每 15 秒轮询：仅在无未保存写入、无打开的编辑表单、页面可见时进行 */
+function startPolling(){
+  clearInterval(STORE.pollTimer);
+  STORE.pollTimer=setInterval(async ()=>{
+    if(CONN.state!=='ok'||STORE.pending>0||document.hidden) return;
+    if(UI.kind==='modal') return;
+    try{
+      const remote=await STORE.load();
+      if(!remote){
+        if(!STORE.emptyWarned){ STORE.emptyWarned=true; flash('云端共享数据为空，请点击「刷新」或重新打开链接。','err'); }
+        return;
+      }
+      STORE.emptyWarned=false;
+      if(canon(remote)===canon(DB)) return;
+      DB=remote; STORE.confirmed=JSON.stringify(remote);
+      render();
+      flash('已同步其他成员的最新改动。','ok');
+    }catch(err){
+      if(!document.hidden) flash('自动同步失败。'+cloudReason(err),'err');
+    }
+  },POLL_MS);
+}
 function seedDB(){
   const p1={id:'p-sample-1',name:'十一月出口单证',desc:'信用证项下单据核对与归档'};
   const p2={id:'p-sample-2',name:'客户 A 返单跟进',desc:'长期客户返单的单证复用'};
@@ -410,7 +583,7 @@ function blankDB(){
   const p={id:uid(),name:'我的第一个项目',desc:'在这里记录本项目的单证任务'};
   return {v:1,seed:false,currentUser:'林悦',activeProject:p.id,view:'all',filterOwner:'',projects:[p],tasks:[]};
 }
-/* 只在数据边界校验：localStorage 读取、导入文件 */
+/* 只在数据边界校验：云端读取、导入文件 */
 function normalize(d){
   const b=(d&&typeof d==='object')?d:{};
   const projects=(Array.isArray(b.projects)?b.projects:[]).filter(p=>p&&p.id&&typeof p.name==='string')
@@ -432,7 +605,8 @@ function normalize(d){
 }
 
 /* ==================== RENDER ==================== */
-let DB = STORE.getAll();
+let DB = null;   // 内存 cache：只在云端 load/persist 成功后才成为权威数据
+const CONN = { state:'loading', message:'' };   // loading | ok | error
 const UI = { q:'', mobileStatus:'todo', kind:null, panelTaskId:null, editId:null,
              lastFocus:null, focusId:null, closeTimer:null, flashTimer:null };
 const $ = s=>document.querySelector(s);
@@ -457,13 +631,17 @@ function flash(msg,kind){
   UI.flashTimer=setTimeout(()=>{ el.hidden=true; },kind==='err'?8000:5000);
 }
 function renderHonest(){
-  $('#honestIcon').innerHTML=ico(STORE.ok?'info':'alert');
-  $('#honestText').textContent=STORE.ok
-    ? '数据仅保存在本机浏览器，不与其他成员同步'
-    : '数据仅保存在本机浏览器；当前浏览器禁止本地存储，本次修改刷新后不会保留';
+  const s=CONN.state;
+  $('#honestIcon').innerHTML=ico(s==='ok'?'info':'alert');
+  $('#honestText').textContent = s==='ok'
+    ? '数据保存在云端，打开此链接的成员看到同一份；链接持有者均可修改'
+    : s==='loading' ? '正在连接云端数据…'
+    : '云端连接异常：'+CONN.message;
+  $('#honestTag').textContent = s==='ok' ? '云端共享 · 每 15 秒同步' : s==='loading' ? '连接中' : '未同步';
   $('#brandMark').innerHTML=ico('board');
   $('#searchIcon').innerHTML=ico('search');
   $('#newIcon').innerHTML=ico('plus');
+  $('#refreshIcon').innerHTML=ico('refresh');
 }
 function renderRail(){
   $('#railViews').innerHTML='<div class="rail-sec"><div class="rail-label">视图</div>'+
@@ -478,11 +656,12 @@ function renderRail(){
   $('#railTools').innerHTML='<div class="rail-tools">'+
     '<div class="rail-label">当前使用者</div>'+
     '<button class="tool-row" data-act="set-user">'+ico('user')+'<span>'+esc(DB.currentUser)+'（点击修改）</span></button>'+
-    '<div class="rail-label">本机数据</div>'+
+    '<div class="rail-label">云端数据</div>'+
+    '<button class="tool-row" data-act="refresh">'+ico('refresh')+'刷新云端数据</button>'+
     '<button class="tool-row" data-act="export">'+ico('download')+'导出 JSON 备份</button>'+
     '<button class="tool-row" data-act="import">'+ico('upload')+'导入 JSON 文件</button>'+
     '<button class="tool-row danger" data-act="clear-data">'+ico('trash')+'清空全部数据</button>'+
-    '<p class="user-chip">存储键名 team-board:v1</p></div>';
+    '<p class="user-chip">共享表 board_state · 链接持有者均可修改</p></div>';
 }
 function navItem(key,iconName,label){
   return '<button class="nav-item '+(DB.view===key?'is-active':'')+'" data-act="view" data-view="'+key+'" aria-current="'+(DB.view===key?'true':'false')+'">'+
@@ -506,7 +685,8 @@ function updateOwnerOptions(){
   const owners=[...new Set(DB.tasks.filter(t=>t.projectId===DB.activeProject).map(t=>t.owner).filter(Boolean))].sort();
   sel.innerHTML='<option value="">全部负责人</option>'+owners.map(o=>
     '<option value="'+esc(o)+'" '+(o===DB.filterOwner?'selected':'')+'>'+esc(o)+'</option>').join('');
-  if(DB.filterOwner&&!owners.includes(DB.filterOwner)){ DB.filterOwner=''; STORE.save(DB); sel.value=''; }
+  /* 渲染阶段绝不触发写入：失效的筛选项只在内存里纠正，等下一次用户操作再落云端 */
+  if(DB.filterOwner&&!owners.includes(DB.filterOwner)){ DB.filterOwner=''; sel.value=''; }
 }
 function renderTabbar(){
   const items=[['all','board','全部'],['mine','mine','我的'],['projects','list','项目'],['tools','sliders','数据']];
@@ -555,6 +735,7 @@ function restoreFocus(){
   UI.focusId=null;
 }
 function renderBoard(){
+  if(!DB || CONN.state!=='ok') return;
   const list=visibleTasks();
   renderSeg(list);
   if(!list.length){ $('#board').innerHTML=emptyHTML(); restoreFocus(); return; }
@@ -569,7 +750,7 @@ function renderBoard(){
   }).join('');
   restoreFocus();
 }
-function render(){ renderHonest(); renderRail(); renderHead(); updateOwnerOptions(); renderTabbar(); renderBoard(); }
+function render(){ if(!DB) return; renderHonest(); renderRail(); renderHead(); updateOwnerOptions(); renderTabbar(); renderBoard(); }
 
 /* ==================== RENDER：浮层内容 ==================== */
 function openPanel(kind,html,firstFocus){
@@ -645,7 +826,7 @@ function simpleForm(id,title,sub,body,submitLabel){
       '<button type="submit" class="btn btn-ink">'+ico('check')+submitLabel+'</button></div></form>';
 }
 function projectFormHTML(){
-  return simpleForm('projectForm','新建项目','项目只保存在本机，切换项目即可查看各自的任务',
+  return simpleForm('projectForm','新建项目','项目保存在云端，打开此链接的成员都能看到',
     '<div class="field"><label for="f-pname">项目名称 <span class="req">必填</span></label>'+
       '<input class="input" id="f-pname" name="pname" required maxlength="40" aria-describedby="e-pname" placeholder="例如 十二月出口单证">'+
       '<p class="err" id="e-pname" hidden>'+ico('alert')+'请填写项目名称。</p></div>'+
@@ -653,18 +834,18 @@ function projectFormHTML(){
       '<input class="input" id="f-pdesc" name="pdesc" maxlength="80" placeholder="一句话说明这批单证的范围"></div>','创建项目');
 }
 function userFormHTML(){
-  return simpleForm('userForm','设置当前使用者','「我的任务」按这个姓名筛选，仅保存在本机浏览器',
+  return simpleForm('userForm','设置当前使用者','「我的任务」按这个姓名筛选，姓名会写入云端共享数据',
     '<div class="field"><label for="f-uname">你的姓名 <span class="req">必填</span></label>'+
       '<input class="input" id="f-uname" name="uname" required maxlength="20" aria-describedby="e-uname" value="'+esc(DB.currentUser)+'">'+
       '<p class="err" id="e-uname" hidden>'+ico('alert')+'请填写姓名。</p></div>','保存姓名');
 }
 function clearConfirmHTML(){
-  return '<div class="panel-head"><div><h2>清空全部数据</h2><div class="sub">此操作只影响本机浏览器</div></div>'+
+  return '<div class="panel-head"><div><h2>清空全部数据</h2><div class="sub">二次确认 · 会影响所有成员，不可撤销</div></div>'+
     '<button class="icon-btn" data-act="close" aria-label="关闭">'+ico('close')+'</button></div>'+
-    '<div class="panel-body"><p>将删除本机保存的全部项目与任务（包含示例数据），清空后不会自动恢复，页面会回到一个空项目。</p>'+
-    '<p><span class="badge badge-warn">'+ico('alert')+'建议先「导出 JSON 备份」再清空。</span></p></div>'+
+    '<div class="panel-body"><p>将删除云端共享的全部项目与任务（包含示例数据）。这会影响所有成员，不可撤销，页面会回到一个空项目。</p>'+
+    '<p><span class="badge badge-warn">'+ico('alert')+'建议先「导出 JSON 备份」再清空；清空会同步给所有打开此链接的成员。</span></p></div>'+
     '<div class="panel-foot"><button class="btn" data-act="close">取消</button>'+
-      '<button class="btn btn-danger" data-act="confirm-clear">'+ico('trash')+'确认清空</button></div>';
+      '<button class="btn btn-danger" data-act="confirm-clear">'+ico('trash')+'确认清空全部成员数据</button></div>';
 }
 function projectSheetHTML(){
   return '<div class="panel-head"><div><h2>切换项目</h2><div class="sub">共 '+DB.projects.length+' 个项目</div></div>'+
@@ -677,9 +858,10 @@ function projectSheetHTML(){
     '<button class="btn" data-act="new-project">'+ico('folderPlus')+'新建项目</button></div>';
 }
 function toolsSheetHTML(){
-  return '<div class="panel-head"><div><h2>本机数据</h2><div class="sub">数据仅保存在本机浏览器，不与其他成员同步</div></div>'+
+  return '<div class="panel-head"><div><h2>云端数据</h2><div class="sub">数据保存在云端，打开此链接的成员看到同一份</div></div>'+
     '<button class="icon-btn" data-act="close" aria-label="关闭">'+ico('close')+'</button></div>'+
     '<div class="panel-body"><div class="sheet-list">'+
+      '<button class="sheet-item" data-act="refresh">'+ico('refresh')+'刷新云端数据</button>'+
       '<button class="sheet-item" data-act="set-user">'+ico('user')+'当前使用者：'+esc(DB.currentUser)+'</button>'+
       '<button class="sheet-item" data-act="export">'+ico('download')+'导出 JSON 备份</button>'+
       '<button class="sheet-item" data-act="import">'+ico('upload')+'导入 JSON 文件</button>'+
@@ -714,9 +896,9 @@ function moveStatus(id,dir){
 }
 function removeTask(id){
   const i=DB.tasks.findIndex(x=>x.id===id); if(i<0) return;
-  const gone=DB.tasks.splice(i,1)[0]; STORE.save(DB);
+  const gone=DB.tasks.splice(i,1)[0];
+  STORE.save(DB,'已删除任务「'+gone.title+'」，已同步到云端。');
   UI.lastFocus=null; closePanel(); render();
-  flash('已删除任务「'+gone.title+'」。','ok');
 }
 function exportJSON(){
   const blob=new Blob([JSON.stringify(DB,null,2)],{type:'application/json'});
@@ -724,7 +906,7 @@ function exportJSON(){
   a.href=url; a.download='单证协作板-'+today()+'.json';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
-  flash('已导出 JSON 备份，可保存在本机或稍后导入。','ok');
+  flash('已导出 JSON 备份文件，文件保存在本机；导入时会写回云端共享数据。','ok');
 }
 function importJSON(file){
   const r=new FileReader();
@@ -732,20 +914,21 @@ function importJSON(file){
     try{
       const d=JSON.parse(String(r.result));
       if(!d||!Array.isArray(d.projects)||!Array.isArray(d.tasks)) throw new Error('文件里没有项目与任务列表');
-      DB=normalize(d); STORE.save(DB);
+      const next=normalize(d);
+      const msg='导入成功：'+next.projects.length+' 个项目、'+next.tasks.length+' 条任务，已写回云端。';
+      DB=next; STORE.save(DB,msg);                 // 写云端 upsert，失败由 STORE 回滚
       UI.q=''; $('#q').value=''; $('#ownerFilter').value='';
       UI.lastFocus=null; closePanel(); render();
-      flash('导入成功：'+DB.projects.length+' 个项目、'+DB.tasks.length+' 条任务。','ok');
     }catch(err){ flash('导入失败：'+err.message+'。请选择本工具导出的 JSON 文件。','err'); }
   };
   r.onerror=()=>flash('读取文件失败，请重试。','err');
   r.readAsText(file);
 }
 function clearData(){
-  STORE.reset(); DB=blankDB(); STORE.save(DB);
+  DB=blankDB();
+  STORE.save(DB,'已清空云端全部数据，示例数据不会自动恢复；所有成员都会看到空看板。');
   UI.q=''; $('#q').value=''; UI.mobileStatus='todo';
   UI.lastFocus=null; closePanel(); render();
-  flash('已清空全部数据，示例数据不会自动恢复。','ok');
 }
 function fieldError(form,inputId,errId,valid,message){
   const input=form.querySelector('#'+inputId), err=form.querySelector('#'+errId);
@@ -762,28 +945,32 @@ function handleSubmit(e){
     if(!fieldError(f,'f-title','e-title',!!title)) return;
     const data={title,owner:f.owner.value.trim()||'未指派',due:f.due.value||'',
                 status:f.status.value,note:f.note.value.trim()};
-    let id;
+    let id, msg;
     if(UI.editId){
       const t=DB.tasks.find(x=>x.id===UI.editId);
       if(t){ Object.assign(t,data); id=t.id; }
+      msg='任务已保存到云端。';
     }else{
       id=uid();
       DB.tasks.push(Object.assign({id,projectId:DB.activeProject,createdAt:today()},data));
+      msg='已创建任务「'+title+'」，已同步到云端。';
     }
-    STORE.save(DB); UI.lastFocus=null; closePanel(); UI.focusId=id;
+    STORE.save(DB,msg); UI.lastFocus=null; closePanel(); UI.focusId=id;
     if(isMobile()) UI.mobileStatus=data.status;
-    render(); flash(UI.editId?'任务已保存。':'已创建任务「'+title+'」。','ok');
+    render();
   }else if(f.id==='projectForm'){
     const name=f.pname.value.trim();
     if(!fieldError(f,'f-pname','e-pname',!!name)) return;
     const p={id:uid(),name,desc:f.pdesc.value.trim()};
-    DB.projects.push(p); DB.activeProject=p.id; DB.seed=false; STORE.save(DB);
-    UI.lastFocus=null; closePanel(); render(); flash('已创建项目「'+name+'」。','ok');
+    DB.projects.push(p); DB.activeProject=p.id; DB.seed=false;
+    STORE.save(DB,'已创建项目「'+name+'」，所有成员可见。');
+    UI.lastFocus=null; closePanel(); render();
   }else if(f.id==='userForm'){
     const name=f.uname.value.trim();
     if(!fieldError(f,'f-uname','e-uname',!!name)) return;
-    DB.currentUser=name; STORE.save(DB);
-    UI.lastFocus=null; closePanel(); render(); flash('当前使用者已设为「'+name+'」。','ok');
+    DB.currentUser=name;
+    STORE.save(DB,'当前使用者已设为「'+name+'」，已写入云端共享数据。');
+    UI.lastFocus=null; closePanel(); render();
   }
 }
 function moveFocusInColumn(dir){
@@ -809,11 +996,12 @@ function onClick(e){
   if(e.target.id==='backdrop'){ closePanel(); return; }
   const btn=e.target.closest('[data-act]');
   if(!btn){
-    const card=e.target.closest('.card');
-    if(card) openDetail(card.dataset.id);
+    if(CONN.state==='ok'){ const card=e.target.closest('.card'); if(card) openDetail(card.dataset.id); }
     return;
   }
   const act=btn.dataset.act, id=btn.dataset.id;
+  if(act==='retry-init'){ init(); return; }   // 云端连不上时唯一的可用操作
+  if(CONN.state!=='ok') return;
   switch(act){
     case 'view': DB.view=btn.dataset.view; STORE.save(DB); closePanel(); render(); break;
     case 'project': DB.activeProject=id; STORE.save(DB); closePanel(); render(); break;
@@ -832,6 +1020,7 @@ function onClick(e){
                          DB.view='all'; STORE.save(DB); render(); break;
     case 'export': exportJSON(); break;
     case 'import': $('#importFile').click(); break;
+    case 'refresh': refreshNow(); break;
     case 'clear-data': openPanel('modal',clearConfirmHTML(),'[data-act="close"]'); break;
     case 'confirm-clear': clearData(); break;
     case 'tab': {
@@ -844,6 +1033,7 @@ function onClick(e){
   }
 }
 function onKeydown(e){
+  if(CONN.state!=='ok') return;
   const t=e.target;
   const typing=!!(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.tagName==='SELECT'||t.isContentEditable));
   if(UI.kind&&e.key==='Tab'){ trapTab(e); return; }
@@ -866,6 +1056,7 @@ function onKeydown(e){
   else if(k==='ArrowLeft'){ e.preventDefault(); moveStatus(id,-1); }
 }
 function onInput(e){
+  if(CONN.state!=='ok') return;
   if(e.target.id==='q'){ UI.q=e.target.value; renderBoard(); return; }
   if(e.target.id==='f-title'||e.target.id==='f-pname'||e.target.id==='f-uname'){
     const err=e.target.getAttribute('aria-describedby');
@@ -874,6 +1065,7 @@ function onInput(e){
   }
 }
 function onChange(e){
+  if(CONN.state!=='ok') return;
   if(e.target.id==='ownerFilter'){ DB.filterOwner=e.target.value; STORE.save(DB); renderBoard(); }
   if(e.target.id==='importFile'){
     const f=e.target.files&&e.target.files[0];
@@ -886,13 +1078,14 @@ function bindEvents(){
   document.addEventListener('keydown',onKeydown);
   document.addEventListener('input',onInput);
   document.addEventListener('change',onChange);
-  $('#panel').addEventListener('submit',e=>{ e.preventDefault(); handleSubmit(e); });
+  $('#panel').addEventListener('submit',e=>{ e.preventDefault(); if(CONN.state==='ok') handleSubmit(e); });
   let rt;
-  window.addEventListener('resize',()=>{ clearTimeout(rt); rt=setTimeout(renderBoard,120); });
+  window.addEventListener('resize',()=>{ if(CONN.state!=='ok') return; clearTimeout(rt); rt=setTimeout(renderBoard,120); });
+  window.addEventListener('offline',()=>flash('网络已断开，改动可能无法保存到云端，请勿关闭页面。','err'));
 }
 /* ==================== INIT ==================== */
 bindEvents();
-render();
+init();
 </script>
 </body>
 </html>
